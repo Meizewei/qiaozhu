@@ -1,0 +1,8 @@
+{
+  "pig_hp": 2,
+  "points_per_pig": 10,
+  "card_interval": 50,
+  "round_target": 120,
+  "respawn_seconds": 0.8,
+  "swing_cooldown": 0.18
+}

@@ -1,0 +1,9 @@
+.DS_Store
+.godot/
+*.tmp
+*.log
+export/
+
+Godot*.exe
+
+04-可直接游玩/
