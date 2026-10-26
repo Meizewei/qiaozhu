@@ -1,24 +1,29 @@
 extends Node2D
-## 第一轮：敲猪、积分、空白卡。后续从 apply_card() 接入升级效果。
+## 第四轮：锤子攻击范围可配置，范围内的猪会被同时敲中；每结束 5 轮弹出一次卡片。
+## 体力耗尽即本轮结束；敲猪得金币存入存钱罐；小猪受击跳动；锤子 5% 暴击金币翻倍。
 
-signal pig_broken(points: int)
+signal pig_broken(coins: int)
 signal card_opened
 
 const SETTINGS_PATH := "res://data/balance.json"
 const CARD_RECT := Rect2(510, 290, 260, 250)
 const CONTINUE_RECT := Rect2(535, 563, 210, 52)
 const RESET_RECT := Rect2(1090, 36, 140, 46)
+const PIG_BOUNDS := Rect2(210, 330, 860, 270) # 小猪活动范围（围栏内）
 var settings: Dictionary
 var pigs: Array[Dictionary] = []
 var particles: Array[Dictionary] = []
 var popups: Array[Dictionary] = []
-var score := 0
+var coins := 0 # 存钱罐里的金币（跨轮保留）
+var round_coins := 0 # 本轮获得的金币
 var hits := 0
 var broken := 0
-var next_card := 50
+var rounds_played := 0 # 已结束的轮数，每 5 轮弹卡
 var phase := "playing" # playing / card / finished
 var cooldown := 0.0
 var swing := 0.0
+var stamina := 100.0
+var stamina_flash := 0.0
 var hammer_position := Vector2(1030, 540)
 var elapsed := 0.0
 var font := SystemFont.new()
@@ -33,38 +38,76 @@ func _ready() -> void:
     add_child(sound)
     reset_game()
 
-func reset_game() -> void:
-    score = 0
-    hits = 0
-    broken = 0
-    next_card = int(settings.card_interval)
-    phase = "playing"
-    cooldown = 0.0
-    swing = 0.0
-    particles.clear()
-    popups.clear()
+func random_pig_velocity() -> Vector2:
+    var angle := randf_range(0.0, TAU)
+    return Vector2(cos(angle), sin(angle)) * float(settings.pig_speed) * randf_range(0.7, 1.3)
+
+func spawn_pigs() -> void:
     pigs.clear()
     for row in range(2):
         for col in range(4):
             pigs.append({
                 "position": Vector2(300 + col * 225, 350 + row * 190),
                 "hp": int(settings.pig_hp), "respawn": 0.0,
-                "flash": 0.0, "seed": float(row * 4 + col)
+                "flash": 0.0, "hop": 0.0, "seed": float(row * 4 + col),
+                "velocity": random_pig_velocity()
             })
+
+func new_round() -> void:
+    # 开始新一轮：保留存钱罐金币与轮数计数
+    round_coins = 0
+    hits = 0
+    broken = 0
+    phase = "playing"
+    cooldown = 0.0
+    swing = 0.0
+    stamina = float(settings.stamina_max)
+    stamina_flash = 0.0
+    particles.clear()
+    popups.clear()
+    spawn_pigs()
     queue_redraw()
+
+func reset_game() -> void:
+    # 完全重开：清空存钱罐与轮数
+    coins = 0
+    rounds_played = 0
+    new_round()
+
+func end_round() -> void:
+    rounds_played += 1
+    if rounds_played % int(settings.card_every_rounds) == 0:
+        phase = "card" # 每 5 轮弹出一次卡片
+        card_opened.emit()
+    else:
+        phase = "finished"
 
 func _process(delta: float) -> void:
     elapsed += delta
     cooldown = maxf(0.0, cooldown - delta)
     swing = maxf(0.0, swing - delta)
+    stamina_flash = maxf(0.0, stamina_flash - delta)
+    for pig in pigs:
+        pig.flash = maxf(0.0, pig.flash - delta)
+        pig.hop = maxf(0.0, pig.hop - delta)
     if phase == "playing":
         hammer_position = get_global_mouse_position()
         for pig in pigs:
-            pig.flash = maxf(0.0, pig.flash - delta)
-            if pig.hp <= 0:
+            if pig.hp > 0:
+                pig.position += pig.velocity * delta
+                if pig.position.x < PIG_BOUNDS.position.x or pig.position.x > PIG_BOUNDS.end.x:
+                    pig.velocity.x = -pig.velocity.x
+                    pig.position.x = clampf(pig.position.x, PIG_BOUNDS.position.x, PIG_BOUNDS.end.x)
+                if pig.position.y < PIG_BOUNDS.position.y or pig.position.y > PIG_BOUNDS.end.y:
+                    pig.velocity.y = -pig.velocity.y
+                    pig.position.y = clampf(pig.position.y, PIG_BOUNDS.position.y, PIG_BOUNDS.end.y)
+            else:
                 pig.respawn -= delta
                 if pig.respawn <= 0.0:
                     pig.hp = int(settings.pig_hp)
+                    pig.velocity = random_pig_velocity()
+        if stamina < float(settings.stamina_cost):
+            end_round() # 体力耗尽，本轮自动结束
     for i in range(particles.size() - 1, -1, -1):
         var p: Dictionary = particles[i]
         p.life -= delta
@@ -87,7 +130,7 @@ func _unhandled_input(event: InputEvent) -> void:
             if phase == "card":
                 apply_card()
             elif phase == "finished":
-                reset_game()
+                new_round()
     if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
         var point := get_global_mouse_position()
         if RESET_RECT.has_point(point):
@@ -97,44 +140,58 @@ func _unhandled_input(event: InputEvent) -> void:
                 apply_card()
         elif phase == "finished":
             if CONTINUE_RECT.has_point(point):
-                reset_game()
+                new_round()
         else:
             strike(point)
 
 func strike(point: Vector2) -> void:
     if phase != "playing" or cooldown > 0.0:
         return
+    if stamina < float(settings.stamina_cost):
+        stamina_flash = 0.4
+        popups.append({"position": point + Vector2(-30, -40), "life": 0.7,
+            "text": "体力不足"})
+        return
     hammer_position = point
     swing = 0.16
     cooldown = float(settings.swing_cooldown)
+    stamina = maxf(0.0, stamina - float(settings.stamina_cost))
+    # 攻击范围：椭圆内的所有猪都会被同时敲中
+    var range_x := float(settings.hammer_range_x)
+    var range_y := float(settings.hammer_range_y)
+    var landed := false
+    var broke_any := false
+    var crit_any := false
     for pig in pigs:
-        var offset: Vector2 = (point - pig.position) / Vector2(84.0, 64.0)
+        var offset: Vector2 = (point - pig.position) / Vector2(range_x, range_y)
         if pig.hp > 0 and offset.length_squared() <= 1.0:
+            landed = true
             hits += 1
             pig.hp -= 1
             pig.flash = 0.14
-            sound.pitch_scale = 1.1 if pig.hp <= 0 else 0.85
-            sound.play()
+            pig.hop = 0.24 # 受击跳动
+            var crit := randf() < float(settings.crit_chance)
             if pig.hp <= 0:
+                broke_any = true
+                if crit:
+                    crit_any = true
                 pig.respawn = float(settings.respawn_seconds)
-                score += int(settings.points_per_pig)
+                var gain := int(settings.coins_per_pig) * (int(settings.crit_multiplier) if crit else 1)
+                coins += gain
+                round_coins += gain
                 broken += 1
                 spawn_particles(pig.position)
-                popups.append({"position": pig.position + Vector2(0, -55), "life": 0.9,
-                    "text": "+" + str(settings.points_per_pig)})
-                pig_broken.emit(int(settings.points_per_pig))
-                if score >= int(settings.round_target):
-                    phase = "finished"
-                elif score >= next_card:
-                    next_card += int(settings.card_interval)
-                    phase = "card"
-                    card_opened.emit()
-            break
+                popups.append({"position": pig.position + Vector2(-24, -55), "life": 0.9,
+                    "text": ("暴击 +" if crit else "+") + str(gain)})
+                pig_broken.emit(gain)
+    if landed:
+        sound.pitch_scale = 1.35 if crit_any else (1.1 if broke_any else 0.85)
+        sound.play()
 
 func apply_card() -> void:
-    # 第二轮在这里添加加成；第一轮只验证弹出与关闭，不改变数值。
+    # 收下卡片后直接开启下一轮；效果后续在这里接入
     if phase == "card":
-        phase = "playing"
+        new_round()
 
 func spawn_particles(center: Vector2) -> void:
     for i in range(16):
@@ -160,18 +217,28 @@ func _draw() -> void:
     draw_rect(Rect2(0, 0, 1280, 800), Color("#202b2b"))
     draw_circle(Vector2(1050, 180), 380, Color("#263332"))
     text_at("敲小猪", Vector2(54, 71), 36)
-    text_at("计科2403  /  第一轮可玩原型", Vector2(55, 103), 16, Color("#a4b6af"))
+    text_at("计科2403  /  第四轮：范围锤 · 五轮弹卡", Vector2(55, 103), 16, Color("#a4b6af"))
     button(RESET_RECT, "重新开始")
     panel(Rect2(52, 137, 1176, 98), Color("#303d3b"))
-    text_at("本轮积分", Vector2(80, 174), 17, Color("#a4b6af"))
-    text_at(str(score).pad_zeros(3), Vector2(80, 214), 32, Color("#efbc72"))
-    text_at("敲碎 " + str(broken) + " 只", Vector2(255, 205), 24)
-    text_at("每只两锤 · 每只 +" + str(int(settings.get("points_per_pig", 10))), Vector2(480, 180), 18)
-    text_at("累计 " + str(int(settings.get("card_interval", 50))) + " 分弹出空白卡", Vector2(480, 211), 18, Color("#a4b6af"))
-    text_at("本轮目标 " + str(int(settings.get("round_target", 120))) + " 分", Vector2(975, 182), 18)
-    panel(Rect2(975, 199, 205, 9), Color("#1f2b29"), 4)
-    if not settings.is_empty():
-        panel(Rect2(975, 199, 205 * clampf(float(score) / float(settings.round_target), 0, 1), 9), Color("#dfb070"), 4)
+    # 存钱罐金币（左上角）
+    text_at("存钱罐金币", Vector2(80, 174), 17, Color("#a4b6af"))
+    draw_circle(Vector2(97, 205), 13, Color("#8a6a2f"))
+    draw_circle(Vector2(97, 205), 10, Color("#f4c85f"))
+    text_at(str(coins).pad_zeros(3), Vector2(120, 214), 32, Color("#efbc72"))
+    text_at("敲碎 " + str(broken) + " 只 · 本轮 +" + str(round_coins), Vector2(280, 205), 24)
+    text_at("每只两锤 · 敲碎 +" + str(int(settings.get("coins_per_pig", 5))) + " 金币", Vector2(560, 180), 18)
+    text_at("暴击 " + str(int(float(settings.get("crit_chance", 0.05)) * 100)) + "% → 金币 ×" + str(int(settings.get("crit_multiplier", 2))) + " · 每 " + str(int(settings.get("card_every_rounds", 5))) + " 轮弹卡", Vector2(560, 211), 18, Color("#a4b6af"))
+    # 体力条
+    var stamina_max := float(settings.get("stamina_max", 100))
+    var stamina_cost := float(settings.get("stamina_cost", 10))
+    var low := stamina < stamina_cost * 3
+    var bar_color := Color("#e06c5c") if low or stamina_flash > 0.0 else Color("#8fd0a8")
+    if stamina_flash > 0.0:
+        bar_color = Color("#e06c5c").lerp(Color.WHITE, 0.5 * sin(stamina_flash * 40) + 0.5)
+    text_at("体力", Vector2(920, 174), 17, Color("#a4b6af"))
+    text_at(str(int(stamina)) + " / " + str(int(stamina_max)), Vector2(920, 214), 26, bar_color)
+    panel(Rect2(1060, 196, 140, 12), Color("#1f2b29"), 5)
+    panel(Rect2(1060, 196, 140 * clampf(stamina / stamina_max, 0.0, 1.0), 12), bar_color, 5)
     panel(Rect2(120, 278, 1040, 396), Color("#141e1e"), 30)
     panel(Rect2(110, 260, 1060, 396), Color("#88694e"), 30)
     panel(Rect2(126, 276, 1028, 364), Color("#a88562"), 23)
@@ -190,8 +257,9 @@ func _draw() -> void:
         draw_circle(p.position, 6 if p.coin else 4, color)
     for p in popups:
         text_at(p.text, p.position, 28, Color("#ffe092"))
-    text_at("移动鼠标瞄准 · 左键挥锤 · R 重开", Vector2(391, 728), 22)
-    text_at("命中会晃动，敲碎后补充；空白卡只展示流程，尚无升级效果。", Vector2(308, 764), 16, Color("#a4b6af"))
+    var stamina_cost_text := str(int(settings.get("stamina_cost", 10)))
+    text_at("移动鼠标瞄准 · 左键挥锤（-" + stamina_cost_text + " 体力）· R 清空重开", Vector2(320, 728), 22)
+    text_at("范围内的猪会被一起敲中；体力耗尽本轮结束，每 5 轮弹出一次卡片。", Vector2(310, 764), 16, Color("#a4b6af"))
     if phase == "playing":
         draw_hammer()
     else:
@@ -206,15 +274,18 @@ func _draw() -> void:
             text_at("也可按空格继续", Vector2(573, 652), 17, Color("#b1c0b8"))
         else:
             panel(Rect2(385, 270, 510, 375), Color("#34423f"), 25)
-            text_at("本轮完成", Vector2(552, 345), 36)
-            text_at("积分  " + str(score) + "    敲碎  " + str(broken) + " 只", Vector2(484, 416), 26, Color("#efbc72"))
-            text_at("敲猪 → 积分 → 弹卡 → 继续敲猪", Vector2(461, 481), 22)
+            text_at("体力耗尽", Vector2(552, 345), 36)
+            text_at("本轮 +" + str(round_coins) + " 金币 · 敲碎 " + str(broken) + " 只", Vector2(461, 416), 26, Color("#efbc72"))
+            text_at("存钱罐共存 " + str(coins) + " 金币 · 第 " + str(rounds_played + 1) + " 轮", Vector2(453, 471), 22)
             button(CONTINUE_RECT, "再来一轮")
+            text_at("按 R 清空存钱罐重开", Vector2(538, 652), 17, Color("#b1c0b8"))
 
 func draw_pig(pig: Dictionary) -> void:
     var pos: Vector2 = pig.position
     if pig.flash > 0.0:
         pos.x += sin(pig.flash * 90) * 8
+    if pig.hop > 0.0:
+        pos.y -= sin(pig.hop / 0.24 * PI) * 26 # 受击向上跳起
     var scale_y := 1.0 - 0.08 * sin(elapsed * 2 + pig.seed)
     draw_set_transform(pos, 0, Vector2(1, scale_y))
     draw_set_transform(pos + Vector2(0, 43), 0, Vector2(1, 0.25))
@@ -243,6 +314,12 @@ func draw_pig(pig: Dictionary) -> void:
     draw_set_transform(Vector2.ZERO)
 
 func draw_hammer() -> void:
+    # 攻击范围指示：锤子周围的浅色椭圆即判定范围
+    var range_x := float(settings.get("hammer_range_x", 84))
+    var range_y := float(settings.get("hammer_range_y", 64))
+    draw_set_transform(hammer_position, 0, Vector2(range_x, range_y))
+    draw_arc(Vector2.ZERO, 1.0, 0, TAU, 64, Color(1, 1, 1, 0.09), 2.0)
+    draw_set_transform(Vector2.ZERO)
     var angle := -0.4 - sin(swing / 0.16 * PI) * 0.8
     draw_set_transform(hammer_position + Vector2(13, -5), angle)
     panel(Rect2(11, -2, 17, 100), Color("#5e412f"), 6)

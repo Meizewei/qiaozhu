@@ -1,8 +1,14 @@
 {
   "pig_hp": 2,
-  "points_per_pig": 10,
-  "card_interval": 50,
-  "round_target": 120,
+  "coins_per_pig": 5,
+  "card_every_rounds": 5,
   "respawn_seconds": 0.8,
-  "swing_cooldown": 0.18
+  "swing_cooldown": 0.18,
+  "stamina_max": 100,
+  "stamina_cost": 10,
+  "pig_speed": 90,
+  "hammer_range_x": 84,
+  "hammer_range_y": 64,
+  "crit_chance": 0.05,
+  "crit_multiplier": 2
 }
